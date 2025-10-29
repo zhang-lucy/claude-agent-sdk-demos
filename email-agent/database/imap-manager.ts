@@ -11,7 +11,7 @@ interface ImapConfig {
   tlsOptions?: { servername: string };
   connTimeout?: number;
   authTimeout?: number;
-  keepalive?: boolean;
+  keepalive?: boolean | { interval: number; idleInterval: number; forceNoop: boolean };
 }
 
 export class ImapManager {
@@ -20,6 +20,10 @@ export class ImapManager {
   private imap: any;
   private isConnected: boolean = false;
   private connectionPromise: Promise<void> | null = null;
+  private isIdling: boolean = false;
+  private idleInterval: any = null;
+  private currentFolder: string = "INBOX";
+  private onNewEmailCallback: ((count: number) => void) | null = null;
 
   private constructor(config?: Partial<ImapConfig>) {
     // Build config from environment or provided config
@@ -126,11 +130,14 @@ export class ImapManager {
     }
   }
 
-  private openMailbox(mailbox: string): Promise<any> {
+  private openMailbox(mailbox: string, readOnly: boolean = true): Promise<any> {
     return new Promise((resolve, reject) => {
-      this.imap.openBox(mailbox, true, (err: Error | null, box: any) => {
+      this.imap.openBox(mailbox, readOnly, (err: Error | null, box: any) => {
         if (err) reject(err);
-        else resolve(box);
+        else {
+          this.currentFolder = mailbox;
+          resolve(box);
+        }
       });
     });
   }
@@ -491,5 +498,226 @@ export class ImapManager {
   public async reconnect(): Promise<void> {
     this.disconnect();
     await this.connect();
+  }
+
+  // Start IDLE monitoring on a specific folder
+  public async startIdleMonitoring(folder: string = "INBOX", onNewEmail: (count: number) => void): Promise<void> {
+    await this.ensureConnection();
+
+    this.currentFolder = folder;
+    this.onNewEmailCallback = onNewEmail;
+
+    console.log(`🔔 Starting IDLE monitoring on folder: ${folder}`);
+
+    // Open the mailbox in read-only mode
+    await this.openMailbox(folder);
+
+    // Mark as idling (connection will automatically use IDLE when configured with keepalive)
+    this.isIdling = true;
+
+    // Set up mail event listener for new emails
+    this.imap.on("mail", (numNewMsgs: number) => {
+      console.log(`📬 New email(s) detected: ${numNewMsgs} new message(s)`);
+      if (this.onNewEmailCallback) {
+        this.onNewEmailCallback(numNewMsgs);
+      }
+    });
+
+    // Set up update event listener (fires when mailbox changes)
+    this.imap.on("update", (seqno: number, info: any) => {
+      console.log(`📝 Email updated: seqno ${seqno}`);
+    });
+
+    // Set up error handler
+    this.imap.on("error", (err: Error) => {
+      console.error("❌ IMAP IDLE error:", err.message);
+      this.isIdling = false;
+      // Attempt to reconnect after error
+      setTimeout(() => {
+        console.log("🔄 Attempting to reconnect after IDLE error...");
+        this.reconnect().then(() => {
+          this.startIdleMonitoring(folder, onNewEmail);
+        }).catch(console.error);
+      }, 5000);
+    });
+
+    // Set up close handler
+    this.imap.on("close", () => {
+      console.log("🔌 IMAP connection closed");
+      this.isConnected = false;
+      this.isIdling = false;
+    });
+
+    console.log("✅ IDLE monitoring active - waiting for new emails...");
+  }
+
+  // Stop IDLE monitoring completely
+  public stopIdleMonitoring(): void {
+    console.log("🛑 Stopping IDLE monitoring...");
+
+    this.isIdling = false;
+
+    if (this.idleInterval) {
+      clearInterval(this.idleInterval);
+      this.idleInterval = null;
+    }
+
+    // Remove event listeners
+    this.imap.removeAllListeners("mail");
+    this.imap.removeAllListeners("update");
+    this.imap.removeAllListeners("error");
+    this.imap.removeAllListeners("close");
+
+    this.onNewEmailCallback = null;
+  }
+
+  // Check if IDLE is currently active
+  public isIdleActive(): boolean {
+    return this.isIdling;
+  }
+
+  // Email action methods for ListenersManager
+
+  /**
+   * Mark an email as read by adding the \Seen flag
+   */
+  public async markAsRead(uid: number, folder: string = "INBOX"): Promise<void> {
+    await this.ensureConnection();
+    await this.openMailbox(folder, false); // Open in read-write mode
+
+    return new Promise((resolve, reject) => {
+      this.imap.addFlags(uid, ['\\Seen'], (err: Error | null) => {
+        if (err) {
+          console.error(`Failed to mark email ${uid} as read:`, err.message);
+          reject(err);
+        } else {
+          console.log(`✓ Marked email ${uid} as read`);
+          resolve();
+        }
+      });
+    });
+  }
+
+  /**
+   * Mark an email as unread by removing the \Seen flag
+   */
+  public async markAsUnread(uid: number, folder: string = "INBOX"): Promise<void> {
+    await this.ensureConnection();
+    await this.openMailbox(folder, false);
+
+    return new Promise((resolve, reject) => {
+      this.imap.delFlags(uid, ['\\Seen'], (err: Error | null) => {
+        if (err) {
+          console.error(`Failed to mark email ${uid} as unread:`, err.message);
+          reject(err);
+        } else {
+          console.log(`✓ Marked email ${uid} as unread`);
+          resolve();
+        }
+      });
+    });
+  }
+
+  /**
+   * Star an email by adding the \Flagged flag
+   */
+  public async starEmail(uid: number, folder: string = "INBOX"): Promise<void> {
+    await this.ensureConnection();
+    await this.openMailbox(folder, false);
+
+    return new Promise((resolve, reject) => {
+      this.imap.addFlags(uid, ['\\Flagged'], (err: Error | null) => {
+        if (err) {
+          console.error(`Failed to star email ${uid}:`, err.message);
+          reject(err);
+        } else {
+          console.log(`✓ Starred email ${uid}`);
+          resolve();
+        }
+      });
+    });
+  }
+
+  /**
+   * Unstar an email by removing the \Flagged flag
+   */
+  public async unstarEmail(uid: number, folder: string = "INBOX"): Promise<void> {
+    await this.ensureConnection();
+    await this.openMailbox(folder, false);
+
+    return new Promise((resolve, reject) => {
+      this.imap.delFlags(uid, ['\\Flagged'], (err: Error | null) => {
+        if (err) {
+          console.error(`Failed to unstar email ${uid}:`, err.message);
+          reject(err);
+        } else {
+          console.log(`✓ Unstarred email ${uid}`);
+          resolve();
+        }
+      });
+    });
+  }
+
+  /**
+   * Archive an email by moving it to [Gmail]/All Mail folder
+   * This removes it from INBOX while keeping it searchable
+   */
+  public async archiveEmail(uid: number, folder: string = "INBOX"): Promise<void> {
+    await this.ensureConnection();
+    await this.openMailbox(folder, false);
+
+    return new Promise((resolve, reject) => {
+      this.imap.move(uid, '[Gmail]/All Mail', (err: Error | null) => {
+        if (err) {
+          console.error(`Failed to archive email ${uid}:`, err.message);
+          reject(err);
+        } else {
+          console.log(`✓ Archived email ${uid} to [Gmail]/All Mail`);
+          resolve();
+        }
+      });
+    });
+  }
+
+  /**
+   * Add a Gmail label to an email using X-GM-LABELS extension
+   */
+  public async addLabel(uid: number, label: string, folder: string = "INBOX"): Promise<void> {
+    await this.ensureConnection();
+    await this.openMailbox(folder, false);
+
+    return new Promise((resolve, reject) => {
+      // Gmail uses X-GM-LABELS as a special flag
+      // Note: This may require Gmail-specific IMAP extensions
+      this.imap.addFlags(uid, [`X-GM-LABELS`, label], (err: Error | null) => {
+        if (err) {
+          console.error(`Failed to add label "${label}" to email ${uid}:`, err.message);
+          reject(err);
+        } else {
+          console.log(`✓ Added label "${label}" to email ${uid}`);
+          resolve();
+        }
+      });
+    });
+  }
+
+  /**
+   * Remove a Gmail label from an email using X-GM-LABELS extension
+   */
+  public async removeLabel(uid: number, label: string, folder: string = "INBOX"): Promise<void> {
+    await this.ensureConnection();
+    await this.openMailbox(folder, false);
+
+    return new Promise((resolve, reject) => {
+      this.imap.delFlags(uid, [`X-GM-LABELS`, label], (err: Error | null) => {
+        if (err) {
+          console.error(`Failed to remove label "${label}" from email ${uid}:`, err.message);
+          reject(err);
+        } else {
+          console.log(`✓ Removed label "${label}" from email ${uid}`);
+          resolve();
+        }
+      });
+    });
   }
 }

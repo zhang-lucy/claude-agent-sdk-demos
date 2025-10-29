@@ -6,6 +6,7 @@ import { DATABASE_PATH } from "./config";
 export interface EmailRecord {
   id?: number;
   message_id: string;
+  imap_uid?: number;
   thread_id?: string;
   in_reply_to?: string;
   email_references?: string;
@@ -220,14 +221,14 @@ export class EmailDatabase {
   ): number {
     const insertEmail = this.db.prepare(`
       INSERT INTO emails (
-        message_id, thread_id, in_reply_to, email_references,
+        message_id, imap_uid, thread_id, in_reply_to, email_references,
         date_sent, date_received, subject, from_address, from_name,
         reply_to, body_text, body_html, snippet,
         is_read, is_starred, is_important, is_draft, is_sent,
         is_trash, is_spam, size_bytes, has_attachments,
         attachment_count, folder, labels, raw_headers
       ) VALUES (
-        $message_id, $thread_id, $in_reply_to, $email_references,
+        $message_id, $imap_uid, $thread_id, $in_reply_to, $email_references,
         $date_sent, $date_received, $subject, $from_address, $from_name,
         $reply_to, $body_text, $body_html, $snippet,
         $is_read, $is_starred, $is_important, $is_draft, $is_sent,
@@ -253,6 +254,7 @@ export class EmailDatabase {
     const insertTransaction = this.db.transaction(() => {
       const result = insertEmail.run({
         $message_id: email.message_id,
+        $imap_uid: email.imap_uid || null,
         $thread_id: email.thread_id || null,
         $in_reply_to: email.in_reply_to || null,
         $email_references: email.email_references || null,

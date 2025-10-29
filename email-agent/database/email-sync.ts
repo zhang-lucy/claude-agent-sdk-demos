@@ -2,6 +2,8 @@ import { EmailSearcher } from "./email-search";
 import { EmailDatabase, EmailRecord, Recipient, Attachment } from "./email-db";
 import { simpleParser } from "mailparser";
 import { DATABASE_PATH } from "./config";
+import { ListenersManager } from "../ccsdk/listeners-manager";
+import type { Email } from "../agent/custom_scripts/types";
 
 interface SyncOptions {
   folder?: string;
@@ -24,10 +26,12 @@ interface SyncOptions {
 export class EmailSyncService {
   private emailSearcher: EmailSearcher;
   private database: EmailDatabase;
+  private listenersManager?: ListenersManager;
 
-  constructor(dbPath: string = DATABASE_PATH) {
+  constructor(dbPath: string = DATABASE_PATH, listenersManager?: ListenersManager) {
     this.emailSearcher = new EmailSearcher();
     this.database = new EmailDatabase(dbPath);
+    this.listenersManager = listenersManager;
   }
 
   // Parse email addresses from string (handles "Name <email@domain.com>" format)
@@ -279,8 +283,9 @@ export class EmailSyncService {
           // Create email record
           const emailRecord: EmailRecord = {
             message_id: rawEmail.messageId || `${uid}-${Date.now()}`,
-            thread_id: rawEmail.threadId || 
-              (typeof rawEmail.references === 'string' ? rawEmail.references.split(" ")[0] : 
+            imap_uid: uid,
+            thread_id: rawEmail.threadId ||
+              (typeof rawEmail.references === 'string' ? rawEmail.references.split(" ")[0] :
                Array.isArray(rawEmail.references) ? rawEmail.references[0] : null),
             in_reply_to: rawEmail.inReplyTo,
             email_references: Array.isArray(rawEmail.references) 
@@ -308,7 +313,25 @@ export class EmailSyncService {
           // Insert into database
           this.database.insertEmail(emailRecord, recipients, attachments);
           stats.synced++;
-          
+
+          // Emit event to listeners
+          if (this.listenersManager) {
+            const emailForListener: Email = {
+              messageId: emailRecord.message_id,
+              from: emailRecord.from_address,
+              to: recipients.filter(r => r.type === 'to').map(r => r.address).join(', '),
+              subject: emailRecord.subject || '',
+              body: emailRecord.body_text || '',
+              date: emailRecord.date_sent.toString(),
+              isRead: emailRecord.is_read || false,
+              hasAttachments: emailRecord.has_attachments || false,
+              labels: emailRecord.labels ? JSON.parse(emailRecord.labels) : undefined,
+              uid: emailRecord.imap_uid
+            };
+
+            await this.listenersManager.checkEvent('email_received', emailForListener);
+          }
+
           if ((i + 1) % 10 === 0) {
             console.log(`Progress: ${i + 1}/${uidsToProcess.length} emails processed`);
           }
@@ -336,10 +359,28 @@ export class EmailSyncService {
     const mostRecent = this.database.db.prepare(
       "SELECT MAX(date_sent) as latest FROM emails"
     ).get() as { latest: string };
-    
+
     const since = mostRecent?.latest ? new Date(mostRecent.latest) : undefined;
-    
+
     return this.syncEmails({ since });
+  }
+
+  // Handle new emails arriving during IDLE monitoring
+  async handleIdleNewEmails(count: number, folder: string = "INBOX"): Promise<void> {
+    console.log(`📬 Handling ${count} new email(s) from IDLE notification in folder: ${folder}`);
+
+    try {
+      // Sync the most recent emails (with a small buffer in case of timing issues)
+      const result = await this.syncEmails({
+        folder,
+        limit: count + 5, // Add buffer for potential race conditions
+        since: new Date(Date.now() - 60000) // Look back 1 minute to catch any timing issues
+      });
+
+      console.log(`✅ IDLE sync complete: ${result.synced} new email(s) synced`);
+    } catch (error) {
+      console.error("❌ Error syncing emails from IDLE:", error);
+    }
   }
 
   close(): void {

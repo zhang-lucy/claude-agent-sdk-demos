@@ -8,6 +8,7 @@ PRAGMA foreign_keys = ON;
 CREATE TABLE IF NOT EXISTS emails (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     message_id TEXT UNIQUE NOT NULL,  -- RFC Message-ID header
+    imap_uid INTEGER,                  -- IMAP UID for server operations
     thread_id TEXT,                    -- For conversation threading
     in_reply_to TEXT,                  -- Parent message ID
     references TEXT,                   -- Thread references (space-separated)
@@ -137,6 +138,7 @@ CREATE INDEX idx_emails_date_sent ON emails(date_sent DESC);
 CREATE INDEX idx_emails_from_address ON emails(from_address);
 CREATE INDEX idx_emails_thread_id ON emails(thread_id);
 CREATE INDEX idx_emails_message_id ON emails(message_id);
+CREATE INDEX idx_emails_imap_uid ON emails(imap_uid);
 CREATE INDEX idx_emails_is_read ON emails(is_read);
 CREATE INDEX idx_emails_is_starred ON emails(is_starred);
 CREATE INDEX idx_emails_folder ON emails(folder);

@@ -1,4 +1,4 @@
-import { tool, createSdkMcpServer } from "@anthropic-ai/claude-code";
+import { tool, createSdkMcpServer } from "@anthropic-ai/claude-agent-sdk";
 import { ostring, z } from "zod";
 import * as path from 'path';
 import * as dotenv from 'dotenv';

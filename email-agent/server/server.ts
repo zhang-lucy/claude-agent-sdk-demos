@@ -6,13 +6,15 @@ import { EmailSyncService } from "../database/email-sync";
 import { DATABASE_PATH } from "../database/config";
 import { DatabaseManager } from "../database/database-manager";
 import { ImapManager } from "../database/imap-manager";
+import { ListenersManager } from "../ccsdk/listeners-manager";
 import {
   handleSyncEndpoint,
   handleSyncStatusEndpoint,
   handleInboxEndpoint,
   handleSearchEndpoint,
   handleEmailDetailsEndpoint,
-  handleBatchEmailsEndpoint
+  handleBatchEmailsEndpoint,
+  handleListenerDetailsEndpoint
 } from "./endpoints";
 
 const wsHandler = new WebSocketHandler(DATABASE_PATH);
@@ -31,7 +33,44 @@ db.run(`
   )
 `);
 
-const syncService = new EmailSyncService(DATABASE_PATH);
+// Initialize Listeners Manager with IMAP and Database dependencies
+const listenersManager = new ListenersManager(
+  (notification) => {
+    // Notification callback - will be used when listeners execute
+    console.log('[Server] Listener notification:', notification);
+    // TODO: Broadcast to WebSocket clients when listeners execute
+  },
+  imapManager,
+  dbManager
+);
+
+// Initialize EmailSyncService with listenersManager
+const syncService = new EmailSyncService(DATABASE_PATH, listenersManager);
+
+// Initialize listeners and IDLE monitoring asynchronously
+(async () => {
+  // Load all listeners at startup
+  await listenersManager.loadAllListeners();
+
+  // Start watching for listener file changes
+  listenersManager.watchListeners((listeners) => {
+    console.log(`[Server] Listeners reloaded: ${listeners.length} active listener(s)`);
+  }).catch((error) => {
+    console.error('[Server] Failed to start listener file watcher:', error);
+  });
+
+  // Start IDLE monitoring for live email notifications
+  try {
+    await imapManager.startIdleMonitoring("INBOX", async (count: number) => {
+      console.log(`[Server] IDLE: ${count} new email(s) detected`);
+      await syncService.handleIdleNewEmails(count, "INBOX");
+    });
+    console.log("✅ IDLE monitoring started successfully");
+  } catch (error) {
+    console.error('❌ Failed to start IDLE monitoring:', error);
+    console.log('ℹ️  Server will continue without IDLE monitoring. You can still sync manually.');
+  }
+})();
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -163,6 +202,25 @@ const server = Bun.serve({
 
     if (url.pathname === '/api/emails/batch' && req.method === 'POST') {
       return handleBatchEmailsEndpoint(req);
+    }
+
+    if (url.pathname.startsWith('/api/listener/') && req.method === 'GET') {
+      const filename = decodeURIComponent(url.pathname.split('/').pop()!);
+      return handleListenerDetailsEndpoint(req, filename);
+    }
+
+    if (url.pathname === '/api/listeners' && req.method === 'GET') {
+      const listeners = listenersManager.getAllListeners();
+      const stats = listenersManager.getStats();
+      return new Response(JSON.stringify({
+        listeners,
+        stats
+      }), {
+        headers: {
+          'Content-Type': 'application/json',
+          ...corsHeaders,
+        },
+      });
     }
 
     if (url.pathname === '/api/chat' && req.method === 'POST') {
