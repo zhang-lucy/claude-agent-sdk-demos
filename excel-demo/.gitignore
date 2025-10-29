@@ -19,9 +19,13 @@ package-lock.json
 # OSX
 .DS_Store
 
+# Old Electron build directories
 release/app/dist
 release/build
 .erb/dll
+
+# Vite build directories
+dist
 
 .idea
 npm-debug.log.*
